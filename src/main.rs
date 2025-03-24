@@ -1,10 +1,8 @@
 use clap::Parser;
 use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
-use reqwest::Client;
 
 lazy_static! {
     static ref CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
@@ -24,25 +22,38 @@ struct Cli {
 #[get("/{path:.*}")]
 async fn proxy (
     path: web::Path<String>, 
-    origin: web::Data<String>, 
-    client: web::Data<String>
+    origin: web::Data<String>
 ) -> impl Responder {
+
+    let path = path.into_inner();
+
+    if path == "favicon.ico" {
+        return HttpResponse::NotFound().body(""); // Respuesta vacía
+    }
+
     let url = format!("{}/{}", origin.get_ref(), path);
     
     if let Some(value) = CACHE.lock().unwrap().get(&url) {
-        return HttpResponse::Ok().body(value.clone());
+        return HttpResponse::Ok()
+                    .insert_header(("X-Cache", "HIT"))
+                    .body(value.clone());
     }
 
-    let response = client.get(&url).send().await; 
+    println!("Requesting: {}", url);
+    println!("Origin: {}", origin.get_ref());
+
+    let response = reqwest::get(&url).await;
 
     match response {
         Ok(res) => {
             let body = res.text().await.unwrap();
             CACHE.lock().unwrap().insert(url.clone(), body.clone());
-            HttpResponse::Ok().body(body)
+            HttpResponse::Ok()
+                            .insert_header(("X-Cache", "MISS"))
+                            .body(body)
         },
-        Err(_) => {
-            HttpResponse::InternalServerError().body("Error")
+        Err(e) => {
+            HttpResponse::InternalServerError().body(format!("Error: {}", e))
         }
     }
 
@@ -55,13 +66,10 @@ async fn main() -> std::io::Result<()> {
     println!("Port: {}", args.port);
     println!("Origin: {}", args.origin);
 
-    let client = Client::new();
-
     // Run the server
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(args.origin.clone())) // Pasar la URL de origen como dato compartido
-            .app_data(web::Data::new(client.clone())) // Pasar el cliente como dato compartido
             .service(proxy) // Registrar el manejador de proxy
     })
     .bind(("127.0.0.1", args.port))?
